@@ -1,0 +1,80 @@
+name: ADHS Appointment Checker
+
+on:
+  schedule:
+    # Every 30 min, Mon–Fri, 07:00–19:30 German time (UTC+2 in summer = UTC+1 in winter)
+    # Using UTC offsets for summer time (CEST = UTC+2)
+    - cron: '0,30 5-17 * * 1-5'
+  workflow_dispatch:   # also allow manual trigger from GitHub Actions tab
+
+jobs:
+  check-appointments:
+    runs-on: ubuntu-latest
+    # Stop running after the target date
+    if: ${{ vars.STOP_AFTER_DATE != 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-adhs
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+          # Install Playwright as fallback for Cloudflare-protected pages
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run appointment checker
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: python adhs_notifier/checker.py
+
+      - name: Create GitHub issue if appointment found
+        # exit code 0 from checker.py = appointment or relevant content detected
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            const title = `ADHS Termin gefunden – ${today}`;
+            const body = [
+              '## Früher Termin verfügbar!',
+              '',
+              'Das automatische Monitoring hat einen Termin vor dem 15.06.2026 gefunden.',
+              '',
+              '**Jetzt prüfen:** https://adhs-spezialambulanz.de/',
+              '',
+              `_Gefunden am ${today} von adhs_check.yml_`,
+            ].join('\n');
+
+            // Check if an open issue with this title already exists today
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'adhs-notifier',
+            });
+
+            const already = issues.data.some(i => i.title === title);
+            if (!already) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['adhs-notifier'],
+              });
+            }

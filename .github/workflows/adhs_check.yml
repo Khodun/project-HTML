@@ -4,7 +4,12 @@ on:
   schedule:
     # Every 30 min, Mon–Fri, 07:00–19:30 German time (CEST = UTC+2)
     - cron: '0,30 5-17 * * 1-5'
-  workflow_dispatch:   # manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Send a test alert without checking the website'
+        type: boolean
+        default: false
 
 jobs:
   check-appointments:
@@ -37,6 +42,7 @@ jobs:
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}   # your Brevo login email
           SMTP_PASS: ${{ secrets.SMTP_PASS }}   # Brevo SMTP key (not your account password)
+          TEST_MODE: ${{ inputs.test_mode }}
         run: python adhs_notifier/checker.py
 
       # Only runs when checker exits 0 (appointment or booking page found)

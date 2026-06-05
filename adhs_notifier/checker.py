@@ -212,6 +212,14 @@ def main():
     smtp_pass = os.environ.get("SMTP_PASS", "")
     today = date.today()
 
+    if os.environ.get("TEST_MODE", "").lower() in ("1", "true"):
+        print("TEST MODE — sending a test alert without checking the website.")
+        if smtp_user and smtp_pass:
+            send_email([], BASE_URL + " [TEST — ignore this]", smtp_user, smtp_pass)
+        else:
+            print("  ⚠  Set SMTP_USER + SMTP_PASS to test email alerts.")
+        sys.exit(0)   # triggers the GitHub issue step too
+
     if today >= TARGET_DATE:
         print("Target date passed — no longer monitoring.")
         sys.exit(1)

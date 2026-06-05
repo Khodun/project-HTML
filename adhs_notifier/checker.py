@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
 """
 Monitors adhs-spezialambulanz.de for early ADHS Diagnostik Neupatienten
-appointments before 15.06.2026. Sends an email when slots appear.
+appointments before 15.06.2026.
 
-Setup:
+Exit codes:
+  0 = appointment (or booking page) found  → GitHub Actions creates an issue
+  1 = nothing found yet                    → no notification
+  2 = site completely unreachable
+
+Setup (local):
   pip install -r requirements.txt
-  export SMTP_USER="your_gmail@gmail.com"
-  export SMTP_PASS="your_gmail_app_password"   # https://myaccount.google.com/apppasswords
   python checker.py
-
-For automated use, run via cron or GitHub Actions (see ../.github/workflows/adhs_check.yml).
 """
 
-import os
 import re
 import sys
 import time
-import smtplib
 from datetime import date, datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import requests
 from bs4 import BeautifulSoup
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-TARGET_DATE = date(2026, 6, 15)          # only alert for slots before this date
-NOTIFY_EMAIL = "jenniferbloom1993@gmail.com"
+TARGET_DATE = date(2026, 6, 15)
 BASE_URL = "https://adhs-spezialambulanz.de"
 
-# Pages to probe (main site + common German booking sub-pages)
 CHECK_PATHS = [
     "/",
     "/termin",
@@ -83,12 +78,10 @@ HEADERS = {
 # ── Date parsing ──────────────────────────────────────────────────────────────
 
 def parse_dates_from_text(text: str) -> list[date]:
-    """Extract all dates from page text that fall between today and TARGET_DATE."""
     found = []
     today = date.today()
     text_lower = text.lower()
 
-    # DD.MM.YYYY  /  DD/MM/YYYY  /  DD-MM-YYYY
     for m in re.finditer(r'\b(\d{1,2})[./\-](\d{1,2})[./\-](20\d{2})\b', text):
         try:
             d = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
@@ -97,7 +90,6 @@ def parse_dates_from_text(text: str) -> list[date]:
         except ValueError:
             pass
 
-    # YYYY-MM-DD  (ISO)
     for m in re.finditer(r'\b(20\d{2})-(\d{2})-(\d{2})\b', text):
         try:
             d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -106,7 +98,6 @@ def parse_dates_from_text(text: str) -> list[date]:
         except ValueError:
             pass
 
-    # "5. Juni 2026" / "5 Juni 2026"
     month_re = '|'.join(GERMAN_MONTHS.keys())
     for m in re.finditer(rf'(\d{{1,2}})\.?\s+({month_re})\s+(20\d{{2}})', text_lower):
         try:
@@ -118,11 +109,9 @@ def parse_dates_from_text(text: str) -> list[date]:
 
     return sorted(set(found))
 
-
 # ── HTTP fetching ─────────────────────────────────────────────────────────────
 
 def fetch_with_requests(url: str, session: requests.Session) -> tuple[str | None, str]:
-    """Return (page_text, final_url) or (None, url) on failure."""
     try:
         r = session.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
         if r.status_code == 200:
@@ -135,7 +124,6 @@ def fetch_with_requests(url: str, session: requests.Session) -> tuple[str | None
 
 
 def fetch_with_playwright(url: str) -> tuple[str | None, str]:
-    """Fallback using Playwright for JS-heavy or Cloudflare-protected pages."""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -149,7 +137,7 @@ def fetch_with_playwright(url: str) -> tuple[str | None, str]:
             browser.close()
             return content, final_url
     except ImportError:
-        pass  # playwright not installed
+        pass
     except Exception as e:
         print(f"    playwright error for {url}: {e}")
     return None, url
@@ -161,7 +149,6 @@ def fetch_page(url: str, session: requests.Session) -> tuple[str | None, str]:
         text, final_url = fetch_with_playwright(url)
     return text, final_url
 
-
 # ── Content analysis ──────────────────────────────────────────────────────────
 
 def has_relevant_content(text: str) -> bool:
@@ -170,53 +157,17 @@ def has_relevant_content(text: str) -> bool:
 
 
 def looks_like_booking_page(text: str) -> bool:
-    """True if the page appears to offer actual appointment booking."""
-    booking_signals = ["buchen", "reservieren", "kalender", "datum wählen", "slot", "verfügbar"]
+    signals = ["buchen", "reservieren", "kalender", "datum wählen", "slot", "verfügbar"]
     lower = text.lower()
-    return sum(1 for s in booking_signals if s in lower) >= 2
-
-
-# ── Notification ──────────────────────────────────────────────────────────────
-
-def send_email(slots: list[date], page_url: str, smtp_user: str, smtp_pass: str):
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "ADHS Termin verfügbar vor dem 15.06.2026!"
-    msg["From"] = smtp_user
-    msg["To"] = NOTIFY_EMAIL
-
-    if slots:
-        slot_str = "\n".join(f"  • {d.strftime('%d.%m.%Y')}" for d in slots)
-        body = (
-            f"Frühe Termine für ADHS Diagnostik Neupatienten gefunden!\n\n"
-            f"Verfügbare Daten (vor dem 15.06.2026):\n{slot_str}\n\n"
-            f"Jetzt prüfen und buchen:\n{page_url}\n\n"
-            f"---\nAutomatische Benachrichtigung — checker.py"
-        )
-    else:
-        body = (
-            f"Die Seite für ADHS Diagnostik Neupatienten hat relevante Inhalte.\n"
-            f"Bitte manuell prüfen, ob ein Termin vor dem 15.06.2026 verfügbar ist:\n\n"
-            f"{page_url}\n\n"
-            f"---\nAutomatische Benachrichtigung — checker.py"
-        )
-
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, NOTIFY_EMAIL, msg.as_string())
-    print(f"  ✓ Email sent to {NOTIFY_EMAIL}")
-
+    return sum(1 for s in signals if s in lower) >= 2
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    smtp_user = os.environ.get("SMTP_USER", "")
-    smtp_pass = os.environ.get("SMTP_PASS", "")
     today = date.today()
-
     if today >= TARGET_DATE:
         print("Target date passed — no longer monitoring.")
-        sys.exit(0)
+        sys.exit(1)
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
           f"Checking for appointments before {TARGET_DATE.strftime('%d.%m.%Y')} …")
@@ -241,7 +192,6 @@ def main():
         if relevant:
             found_relevant = True
             alert_url = final_url
-
             slots = parse_dates_from_text(text)
             if slots:
                 all_slots.extend(slots)
@@ -250,31 +200,25 @@ def main():
             elif looks_like_booking_page(text):
                 print("         → Booking page detected (no explicit dates parsed)")
 
-        time.sleep(1)  # polite crawl delay
+        time.sleep(1)
 
     if checked == 0:
-        print("\nAll pages returned errors — site may be using Cloudflare.")
+        print("\nAll pages blocked — site likely uses Cloudflare.")
         print("Install Playwright: pip install playwright && playwright install chromium")
         sys.exit(2)
 
     all_slots = sorted(set(all_slots))
 
     if all_slots:
-        print(f"\n🎯 Early slots found: {[d.strftime('%d.%m.%Y') for d in all_slots]}")
-        if smtp_user and smtp_pass:
-            send_email(all_slots, alert_url, smtp_user, smtp_pass)
-        else:
-            print("  ⚠  Set SMTP_USER + SMTP_PASS env vars to enable email alerts.")
-        sys.exit(0)
+        print(f"\nEarly slots found: {[d.strftime('%d.%m.%Y') for d in all_slots]}")
+        sys.exit(0)   # triggers GitHub issue
 
     if found_relevant:
-        print(f"\n⚠  Relevant content found but no dates parsed. Manual check: {alert_url}")
-        if smtp_user and smtp_pass:
-            send_email([], alert_url, smtp_user, smtp_pass)
-        sys.exit(0)
+        print(f"\nBooking page found but no explicit dates. Check manually: {alert_url}")
+        sys.exit(0)   # triggers GitHub issue
 
     print("\nNo early appointments found this run.")
-    sys.exit(0)
+    sys.exit(1)       # no notification
 
 
 if __name__ == "__main__":

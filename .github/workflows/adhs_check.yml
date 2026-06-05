@@ -34,6 +34,9 @@ jobs:
       - name: Run appointment checker
         id: check
         continue-on-error: true   # exit 1 (nothing found) must not fail the job
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}   # your Brevo login email
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}   # Brevo SMTP key (not your account password)
         run: python adhs_notifier/checker.py
 
       # Only runs when checker exits 0 (appointment or booking page found)

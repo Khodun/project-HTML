@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 """
 Monitors adhs-spezialambulanz.de for early ADHS Diagnostik Neupatienten
-appointments before 15.06.2026.
+appointments before 15.06.2026. Sends an email via Brevo (free SMTP service)
+when a slot appears.
 
 Exit codes:
-  0 = appointment (or booking page) found  → GitHub Actions creates an issue
+  0 = appointment (or booking page) found  → GitHub Actions also creates an issue
   1 = nothing found yet                    → no notification
   2 = site completely unreachable
 
-Setup (local):
-  pip install -r requirements.txt
-  python checker.py
+Setup (local or GitHub Actions secrets):
+  SMTP_USER  = your Brevo login email  (free account at brevo.com)
+  SMTP_PASS  = Brevo SMTP key          (Brevo dashboard → SMTP & API → Generate SMTP key)
 """
 
+import os
 import re
 import sys
 import time
+import smtplib
 from datetime import date, datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import requests
 from bs4 import BeautifulSoup
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-TARGET_DATE = date(2026, 6, 15)
-BASE_URL = "https://adhs-spezialambulanz.de"
+TARGET_DATE  = date(2026, 6, 15)
+NOTIFY_EMAIL = "jenniferbloom1993@gmail.com"
+BASE_URL     = "https://adhs-spezialambulanz.de"
+
+# Brevo free SMTP — no 2FA, no app-password dance
+SMTP_HOST = "smtp-relay.brevo.com"
+SMTP_PORT = 587
 
 CHECK_PATHS = [
     "/",
@@ -161,10 +171,47 @@ def looks_like_booking_page(text: str) -> bool:
     lower = text.lower()
     return sum(1 for s in signals if s in lower) >= 2
 
+# ── Email notification ────────────────────────────────────────────────────────
+
+def send_email(slots: list[date], page_url: str, smtp_user: str, smtp_pass: str):
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "ADHS Termin verfügbar vor dem 15.06.2026!"
+    msg["From"]    = smtp_user
+    msg["To"]      = NOTIFY_EMAIL
+
+    if slots:
+        slot_str = "\n".join(f"  • {d.strftime('%d.%m.%Y')}" for d in slots)
+        body = (
+            f"Frühe Termine für ADHS Diagnostik Neupatienten gefunden!\n\n"
+            f"Verfügbare Daten (vor dem 15.06.2026):\n{slot_str}\n\n"
+            f"Jetzt prüfen und buchen:\n{page_url}\n\n"
+            f"---\nAutomatische Benachrichtigung — checker.py"
+        )
+    else:
+        body = (
+            f"Die Seite für ADHS Diagnostik Neupatienten hat relevante Inhalte.\n"
+            f"Bitte manuell prüfen, ob ein Termin vor dem 15.06.2026 verfügbar ist:\n\n"
+            f"{page_url}\n\n"
+            f"---\nAutomatische Benachrichtigung — checker.py"
+        )
+
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_user, NOTIFY_EMAIL, msg.as_string())
+
+    print(f"  ✓ Email sent to {NOTIFY_EMAIL}")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    smtp_user = os.environ.get("SMTP_USER", "")
+    smtp_pass = os.environ.get("SMTP_PASS", "")
     today = date.today()
+
     if today >= TARGET_DATE:
         print("Target date passed — no longer monitoring.")
         sys.exit(1)
@@ -211,14 +258,20 @@ def main():
 
     if all_slots:
         print(f"\nEarly slots found: {[d.strftime('%d.%m.%Y') for d in all_slots]}")
-        sys.exit(0)   # triggers GitHub issue
+        if smtp_user and smtp_pass:
+            send_email(all_slots, alert_url, smtp_user, smtp_pass)
+        else:
+            print("  ⚠  Set SMTP_USER + SMTP_PASS to enable email alerts.")
+        sys.exit(0)
 
     if found_relevant:
         print(f"\nBooking page found but no explicit dates. Check manually: {alert_url}")
-        sys.exit(0)   # triggers GitHub issue
+        if smtp_user and smtp_pass:
+            send_email([], alert_url, smtp_user, smtp_pass)
+        sys.exit(0)
 
     print("\nNo early appointments found this run.")
-    sys.exit(1)       # no notification
+    sys.exit(1)
 
 
 if __name__ == "__main__":
